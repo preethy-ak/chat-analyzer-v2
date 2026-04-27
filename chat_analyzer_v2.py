@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import re, io, warnings, gc
 from datetime import datetime, timedelta
+from collections import Counter
 
 warnings.filterwarnings("ignore")
 
@@ -1040,10 +1041,6 @@ def analyse(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXCEL EXPORT
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SALES / AM / MERCH AGGREGATIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1051,91 +1048,74 @@ def build_sales_funnel(conv_df: pd.DataFrame) -> dict:
     total = len(conv_df)
     if total == 0:
         return {}
-    prod_inq   = int((conv_df["ISSUE_TYPE"] == "Product Inquiry").sum())
-    high_intent= int(conv_df["SALES_STAGE"].astype(str).isin(["High Intent","Converted"]).sum())
-    converted  = int(conv_df["IS_CONVERSION"].sum())
-    oos_total  = int(conv_df["IS_OOS_CONFIRMED"].sum())
-    lost       = int(conv_df["IS_LOST_SALE"].sum())
-    upsell_opp = int(conv_df["IS_UPSELL_OPP"].sum())
-    alt_acted  = int(conv_df["ALT_SUGGESTED"].sum())
+    df = conv_df.copy()
+    for _bc in ["IS_CONVERSION","IS_OOS_CONFIRMED","IS_LOST_SALE","IS_UPSELL_OPP","ALT_SUGGESTED"]:
+        if _bc in df.columns:
+            df[_bc] = df[_bc].astype(bool).astype(int)
+    prod_inq   = int((df["ISSUE_TYPE"].astype(str) == "Product Inquiry").sum())
+    high_intent= int(df["SALES_STAGE"].astype(str).isin(["High Intent","Converted"]).sum())
+    converted  = int(df["IS_CONVERSION"].sum())
+    oos_total  = int(df["IS_OOS_CONFIRMED"].sum())
+    lost       = int(df["IS_LOST_SALE"].sum())
+    upsell_opp = int(df["IS_UPSELL_OPP"].sum())
+    alt_acted  = int(df["ALT_SUGGESTED"].sum())
     return {
         "total": total, "prod_inq": prod_inq, "high_intent": high_intent,
         "converted": converted, "oos_total": oos_total, "lost": lost,
         "upsell_opp": upsell_opp, "alt_acted": alt_acted,
-        "conv_rate":   round(converted / total * 100, 1),
-        "lost_rate":   round(lost / total * 100, 1),
-        "upsell_act_rate": round(alt_acted / upsell_opp * 100, 1) if upsell_opp else 0.0,
+        "conv_rate":      round(converted / total * 100, 1),
+        "lost_rate":      round(lost / total * 100, 1),
+        "upsell_act_rate":round(alt_acted / upsell_opp * 100, 1) if upsell_opp else 0.0,
+        "upsell_missed":  upsell_opp - alt_acted,
     }
 
 
-def build_oos_tracker(raw_df: pd.DataFrame, conv_df: pd.DataFrame) -> pd.DataFrame:
-    """Per-conversation OOS demand summary."""
-    oos_ids = conv_df[conv_df["IS_OOS_CONFIRMED"] == True]["CONVERSATION_ID"].tolist()
-    if not oos_ids:
+def build_oos_tracker(conv_df: pd.DataFrame) -> pd.DataFrame:
+    """OOS demand summary — derived entirely from conv_df (no raw_df needed)."""
+    oos = conv_df[conv_df["IS_OOS_CONFIRMED"] == True].copy()
+    if oos.empty:
         return pd.DataFrame()
-    sub = raw_df[raw_df["CONVERSATION_ID"].isin(oos_ids)].copy()
+    # Aggregate by store + item_ids to show restock priority
     rows_out = []
-    for conv_id in oos_ids:
-        msgs = sub[sub["CONVERSATION_ID"] == conv_id]
-        if msgs.empty:
-            continue
-        b_msgs = msgs[msgs["SENDER"].str.lower() == "buyer"]["MESSAGE_PARSED"].tolist()
-        s_msgs = msgs[msgs["SENDER"].str.lower() == "seller"]["MESSAGE_PARSED"].tolist()
-        item_ids   = extract_item_ids(b_msgs)
-        sizes      = extract_size_mentions(b_msgs)
-        colors     = extract_color_mentions(b_msgs)
-        alt_sugg   = detect_alternative_suggested(s_msgs)
-        lost       = detect_lost_sale(b_msgs)
-        store      = msgs["STORE_CODE"].iloc[0]
-        country    = msgs["COUNTRY_CODE"].iloc[0] if "COUNTRY_CODE" in msgs.columns else ""
-        platform   = msgs["PLATFORM"].iloc[0] if "PLATFORM" in msgs.columns else ""
+    for _, row in oos.iterrows():
         rows_out.append({
-            "CONVERSATION_ID": conv_id,
-            "STORE_CODE": store,
-            "COUNTRY_CODE": country,
-            "PLATFORM": platform,
-            "ITEM_IDS_INQUIRED": ", ".join(item_ids) if item_ids else "Unknown",
-            "SIZE_REQUESTED": ", ".join(sizes) if sizes else "—",
-            "COLOR_REQUESTED": ", ".join(colors) if colors else "—",
-            "ALT_SUGGESTED": alt_sugg,
-            "LOST_SALE": lost,
+            "CONVERSATION_ID":  row["CONVERSATION_ID"],
+            "STORE_CODE":       row.get("STORE_CODE", ""),
+            "COUNTRY_CODE":     row.get("COUNTRY_CODE", ""),
+            "PLATFORM":         str(row.get("PLATFORM", "")),
+            "ITEM_IDS_INQUIRED":row.get("ITEM_IDS", "") or "Unknown",
+            "SIZE_REQUESTED":   row.get("SIZE_MENTIONS", "") or "—",
+            "COLOR_REQUESTED":  row.get("COLOR_MENTIONS", "") or "—",
+            "ALT_SUGGESTED":    bool(row.get("ALT_SUGGESTED", False)),
+            "LOST_SALE":        bool(row.get("IS_LOST_SALE", False)),
+            "ISSUE_TYPE":       str(row.get("ISSUE_TYPE", "")),
+            "BUYER_SUMMARY":    str(row.get("BUYER_SUMMARY", ""))[:120],
         })
-    return pd.DataFrame(rows_out) if rows_out else pd.DataFrame()
+    return pd.DataFrame(rows_out)
 
 
-def build_product_demand(raw_df: pd.DataFrame, conv_df: pd.DataFrame):
-    """Most inquired item IDs and variations from Product Inquiry conversations."""
-    pi_ids = conv_df[conv_df["ISSUE_TYPE"] == "Product Inquiry"]["CONVERSATION_ID"].tolist()
-    if not pi_ids:
-        return pd.DataFrame(), pd.DataFrame()
-    sub = raw_df[
-        (raw_df["CONVERSATION_ID"].isin(pi_ids)) &
-        (raw_df["SENDER"].str.lower() == "buyer")
-    ]
-    from collections import Counter
-    item_cnt, size_cnt, color_cnt = Counter(), Counter(), Counter()
-    for _, row in sub.iterrows():
-        msg = str(row.get("MESSAGE_PARSED", ""))
-        for iid in re.findall(r"item_id:(\d+)", msg, re.IGNORECASE):
-            item_cnt[iid] += 1
-        for sz in extract_size_mentions([msg]):
-            size_cnt[sz] += 1
-        for cl in extract_color_mentions([msg]):
-            color_cnt[cl.title()] += 1
-    item_df = pd.DataFrame(
-        [{"Item ID": k, "Inquiry Count": v} for k, v in item_cnt.most_common(20)]
-    ) if item_cnt else pd.DataFrame()
+def build_product_demand(conv_df: pd.DataFrame):
+    """Most inquired item IDs and variations — derived from conv_df columns."""
+    pi = conv_df[conv_df["ISSUE_TYPE"] == "Product Inquiry"]
+    all_items  = [i for ids in pi["ITEM_IDS"].fillna("").str.split("|") for i in ids if i.strip()]
+    all_sizes  = [s for szs in conv_df["SIZE_MENTIONS"].fillna("").str.split("|") for s in szs if s.strip()]
+    all_colors = [c for cls in conv_df["COLOR_MENTIONS"].fillna("").str.split("|") for c in cls if c.strip()]
+    item_df = pd.DataFrame(Counter(all_items).most_common(20), columns=["Item ID", "Inquiry Count"]) if all_items else pd.DataFrame(columns=["Item ID","Inquiry Count"])
     var_rows = (
-        [{"Variation": k, "Type": "Size",  "Count": v} for k, v in size_cnt.most_common(15)] +
-        [{"Variation": k, "Type": "Color", "Count": v} for k, v in color_cnt.most_common(15)]
+        [{"Variation": k, "Type": "Size",  "Count": v} for k, v in Counter(all_sizes).most_common(15)] +
+        [{"Variation": k.title(), "Type": "Color", "Count": v} for k, v in Counter(all_colors).most_common(15)]
     )
-    var_df = pd.DataFrame(var_rows).sort_values("Count", ascending=False) if var_rows else pd.DataFrame()
+    var_df = pd.DataFrame(var_rows).sort_values("Count", ascending=False).reset_index(drop=True) if var_rows else pd.DataFrame(columns=["Variation","Type","Count"])
     return item_df, var_df
 
 
 def build_am_scorecard(conv_df: pd.DataFrame) -> pd.DataFrame:
     """Per-store AM scorecard with sales + ops metrics."""
-    grp = conv_df.groupby(["STORE_CODE", "COUNTRY_CODE", "PLATFORM"]).agg(
+    df = conv_df.copy()
+    for _bc in ["IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_UPSELL_OPP","ALT_SUGGESTED","IS_UNRESOLVED"]:
+        if _bc in df.columns:
+            df[_bc] = df[_bc].astype(bool).astype(int)
+    grp = df.groupby(["STORE_CODE", "COUNTRY_CODE", "PLATFORM"]).agg(
         Total_Chats        = ("CONVERSATION_ID", "count"),
         Product_Inquiries  = ("ISSUE_TYPE",       lambda x: (x == "Product Inquiry").sum()),
         Conversions        = ("IS_CONVERSION",     "sum"),
@@ -1162,16 +1142,20 @@ def build_team_sales_perf(conv_df: pd.DataFrame) -> pd.DataFrame:
     df = conv_df[conv_df["LAST_MSG_TIME"] >= TEAM_START_DATE].copy()
     if df.empty or "TEAM_MEMBER" not in df.columns:
         return pd.DataFrame()
+    # Cast boolean columns to int to avoid sum() issues with category dtype
+    for _bc in ["IS_CONVERSION","IS_UPSELL_OPP","ALT_SUGGESTED","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_RESOLVED","IS_UNRESOLVED"]:
+        if _bc in df.columns:
+            df[_bc] = df[_bc].astype(bool).astype(int)
     perf = df.groupby("TEAM_MEMBER").agg(
         Conversations    = ("CONVERSATION_ID", "count"),
         Resolved         = ("IS_RESOLVED",     "sum"),
         Unresolved       = ("IS_UNRESOLVED",   "sum"),
         Avg_CSAT         = ("CSAT_PROXY",       "mean"),
         Avg_CRT_mins     = ("AVG_CRT_MINS",     "mean"),
-        Positive_Sent    = ("SENTIMENT",        lambda x: (x == "Positive").sum()),
-        Negative_Sent    = ("SENTIMENT",        lambda x: (x == "Negative").sum()),
+        Positive_Sent    = ("SENTIMENT",        lambda x: (x.astype(str) == "Positive").sum()),
+        Negative_Sent    = ("SENTIMENT",        lambda x: (x.astype(str) == "Negative").sum()),
         Conversions      = ("IS_CONVERSION",    "sum"),
-        High_Priority    = ("PRIORITY",         lambda x: (x == "High").sum()),
+        High_Priority    = ("PRIORITY",         lambda x: (x.astype(str) == "High").sum()),
         Upsell_Opps      = ("IS_UPSELL_OPP",    "sum"),
         Alt_Suggested    = ("ALT_SUGGESTED",    "sum"),
         Lost_Sales       = ("IS_LOST_SALE",     "sum"),
@@ -1191,10 +1175,9 @@ def generate_key_improvements(conv_df: pd.DataFrame, funnel: dict) -> list:
     recs = []
     total = funnel.get("total", 1)
     oos_pct   = funnel.get("oos_total", 0) / total * 100
-    lost_pct  = funnel.get("lost_rate", funnel.get("lost_rate", 0))
     lost_pct  = funnel.get("lost_rate", funnel.get("lost", 0) / total * 100)
-    upsell_act= funnel.get("upsell_act_rate", 0)
-    conv_rate = funnel.get("conv_rate", 0)
+    upsell_act = funnel.get("upsell_act_rate", 0)
+    conv_rate  = funnel.get("conv_rate", 0)
     neg_pct   = (conv_df["SENTIMENT"] == "Negative").sum() / total * 100 if total else 0
     unres_pct = conv_df["IS_UNRESOLVED"].mean() * 100 if total else 0
     avg_crt   = conv_df["AVG_CRT_MINS"].mean()
@@ -1204,7 +1187,7 @@ def generate_key_improvements(conv_df: pd.DataFrame, funnel: dict) -> list:
             f"{funnel.get('oos_total',0)} OOS inquiries ({oos_pct:.1f}%). "
             "Restock top-inquired items immediately. Share OOS tracker with buying team weekly."))
     if upsell_act < 40 and funnel.get("upsell_opp", 0) > 5:
-        missed = funnel.get("upsell_opp", 0) - funnel.get("alt_acted", 0)
+        missed = funnel.get("upsell_missed", funnel.get("upsell_opp", 0) - funnel.get("alt_acted", 0))
         recs.append(("🔴 HIGH", "Upsell Execution Gap",
             f"{missed} of {funnel.get('upsell_opp',0)} upsell opps had no alternative suggested. "
             "Train agents: always offer a similar product when buyer asks 'any other options?' or item is OOS."))
@@ -2109,7 +2092,7 @@ def main():
         # ── Sales Stage Distribution ──────────────────────────────────────────
         with c1:
             st.markdown("#### 📊 Sales Stage Distribution")
-            stage_ct = conv_filtered["SALES_STAGE"].value_counts().reset_index()
+            stage_ct = conv_filtered["SALES_STAGE"].astype(str).value_counts().reset_index()
             stage_ct.columns = ["Stage","Count"]
             stage_ct["% Share"] = (stage_ct["Count"] / len(conv_filtered) * 100).round(1)
             st.dataframe(stage_ct, use_container_width=True, hide_index=True,
@@ -2135,14 +2118,17 @@ def main():
 
         # ── Per-store sales breakdown ─────────────────────────────────────────
         st.markdown("#### 🏪 Sales Intelligence by Store")
-        store_sales = conv_filtered.groupby(["STORE_CODE","COUNTRY_CODE","PLATFORM"]).agg(
+        _ss = conv_filtered.copy()
+        for _bc in ["IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_UPSELL_OPP","ALT_SUGGESTED"]:
+            if _bc in _ss.columns: _ss[_bc] = _ss[_bc].astype(bool).astype(int)
+        store_sales = _ss.groupby(["STORE_CODE","COUNTRY_CODE","PLATFORM"]).agg(
             Conversations    = ("CONVERSATION_ID","count"),
             Conversions      = ("IS_CONVERSION","sum"),
             Lost_Sales       = ("IS_LOST_SALE","sum"),
             OOS_Hits         = ("IS_OOS_CONFIRMED","sum"),
             Upsell_Opps      = ("IS_UPSELL_OPP","sum"),
             Alt_Suggested    = ("ALT_SUGGESTED","sum"),
-            Product_Inquiries= ("ISSUE_TYPE", lambda x: (x=="Product Inquiry").sum()),
+            Product_Inquiries= ("ISSUE_TYPE", lambda x: (x.astype(str)=="Product Inquiry").sum()),
         ).reset_index()
         store_sales["Conv_%"]      = (store_sales["Conversions"] / store_sales["Conversations"]*100).round(1)
         store_sales["Lost_%"]      = (store_sales["Lost_Sales"]  / store_sales["Conversations"]*100).round(1)
@@ -2160,10 +2146,13 @@ def main():
 
         # ── Detailed sales conversations ──────────────────────────────────────
         st.markdown("#### 🔎 Sales-Flagged Conversations")
-        sales_flag = conv_filtered[
-            conv_filtered["IS_CONVERSION"] | conv_filtered["IS_LOST_SALE"] |
-            conv_filtered["IS_OOS_CONFIRMED"] | conv_filtered["IS_UPSELL_OPP"]
-        ]
+        _sf_mask = (
+            conv_filtered["IS_CONVERSION"].astype(bool) |
+            conv_filtered["IS_LOST_SALE"].astype(bool) |
+            conv_filtered["IS_OOS_CONFIRMED"].astype(bool) |
+            conv_filtered["IS_UPSELL_OPP"].astype(bool)
+        )
+        sales_flag = conv_filtered[_sf_mask]
         sales_cols = [c for c in [
             "CONVERSATION_ID","STORE_CODE","COUNTRY_CODE","TEAM_MEMBER",
             "SALES_STAGE","IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED",
@@ -2245,7 +2234,7 @@ def main():
         # ── OOS Tracker ───────────────────────────────────────────────────────
         st.markdown("#### 📦 OOS Demand Tracker")
         st.caption("Share with buying/AM team weekly — every OOS = demand signal.")
-        oos_df = build_oos_tracker(raw_df if "raw_df" in dir() else pd.DataFrame(), conv_filtered)
+        oos_df = build_oos_tracker(conv_filtered)
         # raw_df was deleted after analyse(); re-derive from conv_filtered for OOS summary
         oos_store = conv_filtered[conv_filtered["IS_OOS_CONFIRMED"]].groupby(["STORE_CODE","ITEM_IDS"]).agg(
             Demand_Count  = ("CONVERSATION_ID","count"),
@@ -2269,10 +2258,7 @@ def main():
         # ── Product Demand (Merch) ────────────────────────────────────────────
         st.markdown("#### 🔍 Product & Variation Demand — Merch Signals")
         st.caption("Top inquired items and requested sizes/colours — for listing optimisation and stock planning.")
-        item_df, var_df = build_product_demand(
-            pd.DataFrame(),  # raw_df freed from memory; use conv_filtered-derived data
-            conv_filtered
-        )
+        item_df, var_df = build_product_demand(conv_filtered)
         # Derive from conv_filtered directly since raw_df freed
         all_items  = [iid for ids in conv_filtered["ITEM_IDS"].fillna("").str.split("|") for iid in ids if iid]
         all_sizes  = [sz  for szs in conv_filtered["SIZE_MENTIONS"].fillna("").str.split("|") for sz  in szs  if sz]
@@ -2281,22 +2267,18 @@ def main():
         d1, d2 = st.columns(2)
         with d1:
             st.markdown("**📦 Top Inquired Item IDs**")
-            if all_items:
-                item_ct = pd.DataFrame(Counter(all_items).most_common(20), columns=["Item ID","Count"])
-                st.dataframe(item_ct, use_container_width=True, hide_index=True,
-                    column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=int(item_ct["Count"].max()))})
+            if not item_df.empty:
+                max_i = int(item_df["Inquiry Count"].max()) if len(item_df) > 0 else 1
+                st.dataframe(item_df, use_container_width=True, hide_index=True,
+                    column_config={"Inquiry Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_i)})
             else:
                 st.info("No item IDs detected.")
         with d2:
             st.markdown("**📐 Top Requested Variations**")
-            var_rows = (
-                [{"Variation": k, "Type":"Size",  "Count":v} for k,v in Counter(all_sizes).most_common(10)] +
-                [{"Variation": k.title(), "Type":"Color", "Count":v} for k,v in Counter(all_colors).most_common(10)]
-            )
-            if var_rows:
-                vdf = pd.DataFrame(var_rows).sort_values("Count", ascending=False)
-                st.dataframe(vdf, use_container_width=True, hide_index=True,
-                    column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=int(vdf["Count"].max()))})
+            if not var_df.empty:
+                max_v = int(var_df["Count"].max()) if len(var_df) > 0 else 1
+                st.dataframe(var_df, use_container_width=True, hide_index=True,
+                    column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_v)})
             else:
                 st.info("No variation mentions detected.")
 
@@ -2304,11 +2286,14 @@ def main():
 
         # ── Lost Sales Analysis ───────────────────────────────────────────────
         st.markdown("#### 💸 Lost Sales Analysis")
-        lost_df = conv_filtered[conv_filtered["IS_LOST_SALE"] == True]
+        lost_df = conv_filtered[conv_filtered["IS_LOST_SALE"].astype(bool)]
         if not lost_df.empty:
             lc1, lc2 = st.columns(2)
             with lc1:
-                lost_store = lost_df.groupby("STORE_CODE").agg(
+                _ld = lost_df.copy()
+                if "IS_OOS_CONFIRMED" in _ld.columns:
+                    _ld["IS_OOS_CONFIRMED"] = _ld["IS_OOS_CONFIRMED"].astype(bool).astype(int)
+                lost_store = _ld.groupby("STORE_CODE").agg(
                     Lost_Sales=("CONVERSATION_ID","count"),
                     OOS_Related=("IS_OOS_CONFIRMED","sum")
                 ).reset_index().sort_values("Lost_Sales",ascending=False)
