@@ -2027,16 +2027,57 @@ def main():
                 st.dataframe(pd.DataFrame(assign_rows), use_container_width=True, hide_index=True)
 
 
+
+    # ── shared drilldown columns ─────────────────────────────────────────────
+    _DRILL_BASE = [c for c in [
+        "CONVERSATION_ID","PLATFORM","STORE_CODE","CHANNEL_NAME",
+        "SITE_NICK_NAME_ID","COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME",
+        "LAST_MSG_TIME","ISSUE_TYPE","PRIORITY","SENTIMENT",
+        "IS_UNRESOLVED","CSAT_PROXY","AVG_CRT_MINS",
+        "SALES_STAGE","IS_CONVERSION","IS_OOS_CONFIRMED",
+        "IS_LOST_SALE","IS_UPSELL_OPP","ALT_SUGGESTED",
+        "ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS","BUYER_SUMMARY",
+    ] if c in conv_filtered.columns]
+    _DRILL_CFG = {
+        "CSAT_PROXY":      st.column_config.NumberColumn("CSAT",       format="%.1f"),
+        "AVG_CRT_MINS":    st.column_config.NumberColumn("CRT(m)",     format="%.0f"),
+        "IS_UNRESOLVED":   st.column_config.CheckboxColumn("Unresolved?"),
+        "IS_CONVERSION":   st.column_config.CheckboxColumn("Converted?"),
+        "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
+        "IS_LOST_SALE":    st.column_config.CheckboxColumn("Lost Sale?"),
+        "IS_UPSELL_OPP":   st.column_config.CheckboxColumn("Upsell Opp?"),
+        "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
+        "BUYER_SUMMARY":   st.column_config.TextColumn("Summary",      width="large"),
+        "ITEM_IDS":        st.column_config.TextColumn("Item IDs"),
+        "SIZE_MENTIONS":   st.column_config.TextColumn("Sizes"),
+        "COLOR_MENTIONS":  st.column_config.TextColumn("Colours"),
+        "LAST_MSG_TIME":   st.column_config.DatetimeColumn("Last Msg",  format="YYYY-MM-DD HH:mm"),
+    }
+
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 7 : SALES INTELLIGENCE
+    # TAB 7 : SALES INTELLIGENCE  — every KPI is drillable
     # ══════════════════════════════════════════════════════════════════════════
     with tab7:
         st.markdown("### 💰 Sales Intelligence")
-        st.caption("Conversion funnel, upsell opportunities, OOS demand, and lost sales — from chat data.")
+        st.caption("Click **▶ View Details** under any metric to see the full supporting chat data.")
 
         funnel = build_sales_funnel(conv_filtered)
 
-        # ── Funnel KPIs ───────────────────────────────────────────────────────
+        # ── bool-safe copy for aggregations ──────────────────────────────────
+        _cf = conv_filtered.copy()
+        for _bc in ["IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_UPSELL_OPP","ALT_SUGGESTED","IS_UNRESOLVED"]:
+            if _bc in _cf.columns:
+                _cf[_bc] = _cf[_bc].astype(bool).astype(int)
+
+        # ── Subsets ───────────────────────────────────────────────────────────
+        _conv_rows   = conv_filtered[conv_filtered["IS_CONVERSION"].astype(bool)]
+        _oos_rows    = conv_filtered[conv_filtered["IS_OOS_CONFIRMED"].astype(bool)]
+        _lost_rows   = conv_filtered[conv_filtered["IS_LOST_SALE"].astype(bool)]
+        _upsell_rows = conv_filtered[conv_filtered["IS_UPSELL_OPP"].astype(bool)]
+        _upsell_missed = _upsell_rows[~_upsell_rows["ALT_SUGGESTED"].astype(bool)]
+        _prod_rows   = conv_filtered[conv_filtered["ISSUE_TYPE"].astype(str) == "Product Inquiry"]
+
+        # ── KPI row ───────────────────────────────────────────────────────────
         k1,k2,k3,k4,k5 = st.columns(5)
         with k1:
             st.markdown(f"""<div class="metric-card green">
@@ -2071,109 +2112,277 @@ def main():
 
         st.markdown("---")
 
-        # ── Sales Funnel Table ────────────────────────────────────────────────
-        st.markdown("#### 🔽 Sales Funnel")
-        funnel_df = pd.DataFrame([
-            {"Stage": "All Conversations",  "Count": funnel.get("total",0)},
-            {"Stage": "Product Inquiries",  "Count": funnel.get("prod_inq",0)},
-            {"Stage": "High Intent",        "Count": funnel.get("high_intent",0)},
-            {"Stage": "Converted",          "Count": funnel.get("converted",0)},
-            {"Stage": "Lost Sales",         "Count": funnel.get("lost",0)},
-        ])
-        funnel_df["% of Total"] = (funnel_df["Count"] / max(funnel.get("total",1),1) * 100).round(1)
-        st.dataframe(funnel_df, use_container_width=True, hide_index=True,
-            column_config={
-                "% of Total": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)
-            })
+        # ── DRILLDOWN 1 : Conversions ─────────────────────────────────────────
+        with st.expander(f"💰 View {len(_conv_rows)} Conversion Conversations", expanded=False):
+            st.caption("Conversations where buyer expressed clear purchase intent or placed an order.")
+            if not _conv_rows.empty:
+                st.dataframe(_conv_rows[_DRILL_BASE].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=400, column_config=_DRILL_CFG)
+                _c1,_c2,_c3 = st.columns(3)
+                with _c1:
+                    st.markdown("**By Store**")
+                    st.dataframe(_cf[_cf["IS_CONVERSION"]==1].groupby("STORE_CODE").agg(Conversions=("CONVERSATION_ID","count"),Avg_CSAT=("CSAT_PROXY","mean")).reset_index().sort_values("Conversions",ascending=False), use_container_width=True, hide_index=True)
+                with _c2:
+                    st.markdown("**By Country**")
+                    st.dataframe(_cf[_cf["IS_CONVERSION"]==1].groupby("COUNTRY_CODE").agg(Conversions=("CONVERSATION_ID","count")).reset_index().sort_values("Conversions",ascending=False), use_container_width=True, hide_index=True)
+                with _c3:
+                    st.markdown("**By Platform**")
+                    st.dataframe(_cf[_cf["IS_CONVERSION"]==1].groupby("PLATFORM").agg(Conversions=("CONVERSATION_ID","count")).reset_index().sort_values("Conversions",ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.info("No conversions detected.")
+
+        # ── DRILLDOWN 2 : OOS Inquiries ───────────────────────────────────────
+        with st.expander(f"📦 View {len(_oos_rows)} OOS Inquiry Conversations", expanded=False):
+            st.caption("Conversations where seller confirmed item is out of stock. Use to build restock priority list.")
+            if not _oos_rows.empty:
+                # Summary by item ID + store
+                _oos_agg = _cf[_cf["IS_OOS_CONFIRMED"]==1].groupby(["STORE_CODE","COUNTRY_CODE","ITEM_IDS"]).agg(
+                    Demand_Count   = ("CONVERSATION_ID","count"),
+                    Lost_Sales     = ("IS_LOST_SALE","sum"),
+                    Alt_Suggested  = ("ALT_SUGGESTED","sum"),
+                    Size_Requested = ("SIZE_MENTIONS",  lambda x: " | ".join(sorted(set(v for vals in x for v in str(vals).split("|") if v.strip())))),
+                    Color_Requested= ("COLOR_MENTIONS", lambda x: " | ".join(sorted(set(v for vals in x for v in str(vals).split("|") if v.strip())))),
+                ).reset_index().rename(columns={"ITEM_IDS":"Item IDs"})
+                _oos_agg["Priority Score"] = _oos_agg["Demand_Count"] + _oos_agg["Lost_Sales"]*2
+                _oos_agg["Alt_Act_%"] = (_oos_agg["Alt_Suggested"] / _oos_agg["Demand_Count"]*100).round(0)
+                _oos_agg = _oos_agg.sort_values("Priority Score", ascending=False).reset_index(drop=True)
+                st.markdown("**🔢 OOS Restock Priority — by Item ID, Store & Demand**")
+                st.caption("Priority Score = Demand Count + (Lost Sales × 2). Share with buying team.")
+                max_ps = int(_oos_agg["Priority Score"].max()) if len(_oos_agg) else 1
+                st.dataframe(_oos_agg, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Priority Score": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_ps),
+                        "Lost_Sales":     st.column_config.NumberColumn("Lost Sales"),
+                        "Alt_Act_%":      st.column_config.NumberColumn("Alt Suggested %", format="%.0f%%"),
+                    })
+                st.markdown("---")
+                st.markdown("**📋 Full OOS Conversation Detail**")
+                _oos_detail_cols = [c for c in [
+                    "CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","SITE_NICK_NAME_ID",
+                    "COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME",
+                    "ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS",
+                    "IS_LOST_SALE","ALT_SUGGESTED","SENTIMENT","BUYER_SUMMARY"
+                ] if c in _oos_rows.columns]
+                st.dataframe(_oos_rows[_oos_detail_cols].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=380, column_config={
+                        "IS_LOST_SALE":  st.column_config.CheckboxColumn("Lost Sale?"),
+                        "ALT_SUGGESTED": st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "LAST_MSG_TIME": st.column_config.DatetimeColumn("Last Msg", format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY": st.column_config.TextColumn("Summary", width="large"),
+                        "ITEM_IDS":      st.column_config.TextColumn("Item IDs"),
+                        "SIZE_MENTIONS": st.column_config.TextColumn("Sizes"),
+                        "COLOR_MENTIONS":st.column_config.TextColumn("Colours"),
+                    })
+            else:
+                st.info("No OOS inquiries detected.")
+
+        # ── DRILLDOWN 3 : Lost Sales ──────────────────────────────────────────
+        with st.expander(f"💸 View {len(_lost_rows)} Lost Sale Conversations", expanded=False):
+            st.caption("Buyers who disengaged without purchasing — OOS, price concern, or no response.")
+            if not _lost_rows.empty:
+                _lc1, _lc2, _lc3 = st.columns(3)
+                _ld = _cf[_cf["IS_LOST_SALE"]==1].copy()
+                with _lc1:
+                    st.markdown("**By Store**")
+                    st.dataframe(_ld.groupby("STORE_CODE").agg(Lost=("CONVERSATION_ID","count"),OOS_Related=("IS_OOS_CONFIRMED","sum")).reset_index().sort_values("Lost",ascending=False), use_container_width=True, hide_index=True)
+                with _lc2:
+                    st.markdown("**By Issue / Root Cause**")
+                    st.dataframe(_ld.groupby("ISSUE_TYPE").agg(Lost=("CONVERSATION_ID","count")).reset_index().sort_values("Lost",ascending=False), use_container_width=True, hide_index=True)
+                with _lc3:
+                    st.markdown("**By Country**")
+                    st.dataframe(_ld.groupby("COUNTRY_CODE").agg(Lost=("CONVERSATION_ID","count")).reset_index().sort_values("Lost",ascending=False), use_container_width=True, hide_index=True)
+                st.markdown("---")
+                st.markdown("**📋 Full Lost Sale Conversation Detail**")
+                _lost_cols = [c for c in [
+                    "CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","SITE_NICK_NAME_ID",
+                    "COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME",
+                    "ISSUE_TYPE","PRIORITY","SENTIMENT","IS_OOS_CONFIRMED",
+                    "ALT_SUGGESTED","ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS","BUYER_SUMMARY"
+                ] if c in _lost_rows.columns]
+                st.dataframe(_lost_rows[_lost_cols].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=400, column_config={
+                        "IS_OOS_CONFIRMED": st.column_config.CheckboxColumn("OOS?"),
+                        "ALT_SUGGESTED":    st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "LAST_MSG_TIME":    st.column_config.DatetimeColumn("Last Msg", format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY":    st.column_config.TextColumn("Summary", width="large"),
+                        "ITEM_IDS":         st.column_config.TextColumn("Item IDs"),
+                        "SIZE_MENTIONS":    st.column_config.TextColumn("Sizes"),
+                        "COLOR_MENTIONS":   st.column_config.TextColumn("Colours"),
+                    })
+            else:
+                st.success("✅ No lost sales detected.")
+
+        # ── DRILLDOWN 4 : Upsell Opportunities ───────────────────────────────
+        with st.expander(f"🔁 View {len(_upsell_rows)} Upsell Opportunity Conversations ({len(_upsell_missed)} missed)", expanded=False):
+            st.caption("Buyers who asked for alternatives, recommendations, or bundling options.")
+            if not _upsell_rows.empty:
+                _u1, _u2 = st.columns(2)
+                with _u1:
+                    st.markdown(f"**✅ Acted ({len(_upsell_rows) - len(_upsell_missed)}) — Alternative was suggested**")
+                    _acted = _upsell_rows[_upsell_rows["ALT_SUGGESTED"].astype(bool)]
+                    if not _acted.empty:
+                        st.dataframe(_acted[[c for c in ["CONVERSATION_ID","STORE_CODE","COUNTRY_CODE","TEAM_MEMBER","SENTIMENT","BUYER_SUMMARY"] if c in _acted.columns]].reset_index(drop=True),
+                            use_container_width=True, height=280,
+                            column_config={"BUYER_SUMMARY": st.column_config.TextColumn("Summary", width="large")})
+                    else:
+                        st.info("None acted on.")
+                with _u2:
+                    st.markdown(f"**❌ Missed ({len(_upsell_missed)}) — No alternative suggested**")
+                    if not _upsell_missed.empty:
+                        st.dataframe(_upsell_missed[[c for c in ["CONVERSATION_ID","STORE_CODE","COUNTRY_CODE","TEAM_MEMBER","SENTIMENT","BUYER_SUMMARY"] if c in _upsell_missed.columns]].reset_index(drop=True),
+                            use_container_width=True, height=280,
+                            column_config={"BUYER_SUMMARY": st.column_config.TextColumn("Summary", width="large")})
+                    else:
+                        st.success("All upsell opps were acted on!")
+                st.markdown("---")
+                st.markdown("**By Agent — Upsell Action Rate**")
+                _uagg = _cf[_cf["IS_UPSELL_OPP"]==1].groupby("TEAM_MEMBER").agg(
+                    Upsell_Opps    = ("CONVERSATION_ID","count"),
+                    Alt_Suggested  = ("ALT_SUGGESTED","sum"),
+                ).reset_index()
+                _uagg["Action_Rate_%"] = (_uagg["Alt_Suggested"] / _uagg["Upsell_Opps"]*100).round(1)
+                _uagg["Missed"] = _uagg["Upsell_Opps"] - _uagg["Alt_Suggested"]
+                st.dataframe(_uagg.sort_values("Upsell_Opps", ascending=False), use_container_width=True, hide_index=True,
+                    column_config={"Action_Rate_%": st.column_config.ProgressColumn("Action Rate%", format="%.1f%%", min_value=0, max_value=100)})
+            else:
+                st.info("No upsell opportunities detected.")
+
+        # ── DRILLDOWN 5 : Product Inquiries ───────────────────────────────────
+        with st.expander(f"🛍️ View {len(_prod_rows)} Product Inquiry Conversations", expanded=False):
+            st.caption("Buyers asking about products — price, size, colour, availability. These are warm leads.")
+            if not _prod_rows.empty:
+                _pa1, _pa2, _pa3 = st.columns(3)
+                _pd_int = _cf[_cf["ISSUE_TYPE"].astype(str)=="Product Inquiry"]
+                with _pa1:
+                    st.markdown("**By Store**")
+                    st.dataframe(_pd_int.groupby(["STORE_CODE","COUNTRY_CODE"]).agg(
+                        Inquiries=("CONVERSATION_ID","count"),
+                        Converted=("IS_CONVERSION","sum"),
+                        OOS=("IS_OOS_CONFIRMED","sum"),
+                        Lost=("IS_LOST_SALE","sum"),
+                    ).reset_index().sort_values("Inquiries",ascending=False), use_container_width=True, hide_index=True)
+                with _pa2:
+                    st.markdown("**By Channel / Platform**")
+                    st.dataframe(_pd_int.groupby(["PLATFORM","CHANNEL_NAME"] if "CHANNEL_NAME" in _pd_int.columns else ["PLATFORM"]).agg(
+                        Inquiries=("CONVERSATION_ID","count"),
+                        Converted=("IS_CONVERSION","sum"),
+                    ).reset_index().sort_values("Inquiries",ascending=False).head(15), use_container_width=True, hide_index=True)
+                with _pa3:
+                    # Top item IDs inquired
+                    _all_items = [i for ids in _prod_rows["ITEM_IDS"].fillna("").str.split("|") for i in ids if i.strip()]
+                    if _all_items:
+                        st.markdown("**Top Item IDs Inquired**")
+                        _item_ct = pd.DataFrame(Counter(_all_items).most_common(15), columns=["Item ID","Count"])
+                        max_ic = int(_item_ct["Count"].max())
+                        st.dataframe(_item_ct, use_container_width=True, hide_index=True,
+                            column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_ic)})
+                    else:
+                        st.info("No item IDs found.")
+                st.markdown("---")
+
+                # Variation demand
+                _v1, _v2 = st.columns(2)
+                _all_sizes  = [s for szs in _prod_rows["SIZE_MENTIONS"].fillna("").str.split("|") for s in szs if s.strip()]
+                _all_colors = [c for cls in _prod_rows["COLOR_MENTIONS"].fillna("").str.split("|") for c in cls if c.strip()]
+                with _v1:
+                    if _all_sizes:
+                        st.markdown("**📐 Size Demand**")
+                        _sdf = pd.DataFrame(Counter(_all_sizes).most_common(15), columns=["Size","Count"])
+                        st.dataframe(_sdf, use_container_width=True, hide_index=True,
+                            column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=int(_sdf["Count"].max()))})
+                    else:
+                        st.info("No size mentions.")
+                with _v2:
+                    if _all_colors:
+                        st.markdown("**🎨 Colour Demand**")
+                        _cdf = pd.DataFrame(Counter([c.title() for c in _all_colors]).most_common(15), columns=["Colour","Count"])
+                        st.dataframe(_cdf, use_container_width=True, hide_index=True,
+                            column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=int(_cdf["Count"].max()))})
+                    else:
+                        st.info("No colour mentions.")
+                st.markdown("---")
+                st.markdown("**📋 Full Product Inquiry Conversation Detail**")
+                _pi_cols = [c for c in [
+                    "CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","SITE_NICK_NAME_ID",
+                    "COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME",
+                    "IS_CONVERSION","IS_OOS_CONFIRMED","IS_LOST_SALE","ALT_SUGGESTED",
+                    "ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS","SENTIMENT","BUYER_SUMMARY"
+                ] if c in _prod_rows.columns]
+                st.dataframe(_prod_rows[_pi_cols].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=420, column_config={
+                        "IS_CONVERSION":   st.column_config.CheckboxColumn("Converted?"),
+                        "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
+                        "IS_LOST_SALE":    st.column_config.CheckboxColumn("Lost?"),
+                        "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "LAST_MSG_TIME":   st.column_config.DatetimeColumn("Last Msg", format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY":   st.column_config.TextColumn("Summary", width="large"),
+                        "ITEM_IDS":        st.column_config.TextColumn("Item IDs"),
+                        "SIZE_MENTIONS":   st.column_config.TextColumn("Sizes"),
+                        "COLOR_MENTIONS":  st.column_config.TextColumn("Colours"),
+                    })
+            else:
+                st.info("No product inquiries detected.")
 
         st.markdown("---")
-        c1, c2 = st.columns(2)
 
-        # ── Sales Stage Distribution ──────────────────────────────────────────
-        with c1:
-            st.markdown("#### 📊 Sales Stage Distribution")
+        # ── Sales Funnel + Stage Summary ──────────────────────────────────────
+        st.markdown("#### 🔽 Sales Funnel Overview")
+        _fc1, _fc2 = st.columns(2)
+        with _fc1:
+            funnel_df = pd.DataFrame([
+                {"Stage":"All Conversations","Count":funnel.get("total",0)},
+                {"Stage":"Product Inquiries","Count":funnel.get("prod_inq",0)},
+                {"Stage":"High Intent",      "Count":funnel.get("high_intent",0)},
+                {"Stage":"Converted",        "Count":funnel.get("converted",0)},
+                {"Stage":"Lost Sales",       "Count":funnel.get("lost",0)},
+            ])
+            funnel_df["% of Total"] = (funnel_df["Count"]/max(funnel.get("total",1),1)*100).round(1)
+            st.dataframe(funnel_df, use_container_width=True, hide_index=True,
+                column_config={"% of Total": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
+        with _fc2:
+            st.markdown("**Sales Stage Distribution**")
             stage_ct = conv_filtered["SALES_STAGE"].astype(str).value_counts().reset_index()
             stage_ct.columns = ["Stage","Count"]
-            stage_ct["% Share"] = (stage_ct["Count"] / len(conv_filtered) * 100).round(1)
+            stage_ct["% Share"] = (stage_ct["Count"]/len(conv_filtered)*100).round(1)
             st.dataframe(stage_ct, use_container_width=True, hide_index=True,
                 column_config={"% Share": st.column_config.ProgressColumn(format="%.1f%%", min_value=0, max_value=100)})
 
-        # ── Upsell Scorecard ──────────────────────────────────────────────────
-        with c2:
-            st.markdown("#### 🔁 Upsell Action Scorecard")
-            u_opp    = funnel.get("upsell_opp",0)
-            u_acted  = funnel.get("alt_acted",0)
-            u_missed = u_opp - u_acted
-            st.markdown(f"""
-            <div class="reply-box">
-            <b>Upsell Opportunities Detected:</b> {u_opp}<br>
-            <b>Alternative Suggested ✅:</b> {u_acted}<br>
-            <b>Missed (no suggestion) ❌:</b> {u_missed}<br>
-            <b>Action Rate:</b> {funnel.get("upsell_act_rate",0)}%<br><br>
-            <i>💡 Target: suggest an alternative on 100% of upsell-signalled chats.
-            Each missed upsell is a potential lost basket.</i>
-            </div>""", unsafe_allow_html=True)
-
         st.markdown("---")
 
-        # ── Per-store sales breakdown ─────────────────────────────────────────
+        # ── Per-store sales summary ───────────────────────────────────────────
         st.markdown("#### 🏪 Sales Intelligence by Store")
-        _ss = conv_filtered.copy()
-        for _bc in ["IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_UPSELL_OPP","ALT_SUGGESTED"]:
-            if _bc in _ss.columns: _ss[_bc] = _ss[_bc].astype(bool).astype(int)
-        store_sales = _ss.groupby(["STORE_CODE","COUNTRY_CODE","PLATFORM"]).agg(
-            Conversations    = ("CONVERSATION_ID","count"),
-            Conversions      = ("IS_CONVERSION","sum"),
-            Lost_Sales       = ("IS_LOST_SALE","sum"),
-            OOS_Hits         = ("IS_OOS_CONFIRMED","sum"),
-            Upsell_Opps      = ("IS_UPSELL_OPP","sum"),
-            Alt_Suggested    = ("ALT_SUGGESTED","sum"),
-            Product_Inquiries= ("ISSUE_TYPE", lambda x: (x.astype(str)=="Product Inquiry").sum()),
+        store_sales = _cf.groupby(["STORE_CODE","COUNTRY_CODE","PLATFORM"]).agg(
+            Conversations    =("CONVERSATION_ID","count"),
+            Conversions      =("IS_CONVERSION","sum"),
+            Lost_Sales       =("IS_LOST_SALE","sum"),
+            OOS_Hits         =("IS_OOS_CONFIRMED","sum"),
+            Upsell_Opps      =("IS_UPSELL_OPP","sum"),
+            Alt_Suggested    =("ALT_SUGGESTED","sum"),
+            Product_Inquiries=("ISSUE_TYPE", lambda x: (x.astype(str)=="Product Inquiry").sum()),
         ).reset_index()
-        store_sales["Conv_%"]      = (store_sales["Conversions"] / store_sales["Conversations"]*100).round(1)
-        store_sales["Lost_%"]      = (store_sales["Lost_Sales"]  / store_sales["Conversations"]*100).round(1)
-        store_sales["OOS_%"]       = (store_sales["OOS_Hits"]    / store_sales["Conversations"]*100).round(1)
-        store_sales["Upsell_Act_%"]= (store_sales["Alt_Suggested"] / store_sales["Upsell_Opps"].replace(0,np.nan)*100).round(1)
+        store_sales["Conv_%"]       = (store_sales["Conversions"]/store_sales["Conversations"]*100).round(1)
+        store_sales["Lost_%"]       = (store_sales["Lost_Sales"] /store_sales["Conversations"]*100).round(1)
+        store_sales["OOS_%"]        = (store_sales["OOS_Hits"]   /store_sales["Conversations"]*100).round(1)
+        store_sales["Upsell_Act_%"] = (store_sales["Alt_Suggested"]/store_sales["Upsell_Opps"].replace(0,np.nan)*100).round(1)
         st.dataframe(store_sales.sort_values("Conversations",ascending=False), use_container_width=True, hide_index=True,
             column_config={
-                "Conv_%":       st.column_config.ProgressColumn("Conv%",      format="%.1f%%", min_value=0, max_value=100),
-                "Lost_%":       st.column_config.ProgressColumn("Lost%",      format="%.1f%%", min_value=0, max_value=100),
-                "OOS_%":        st.column_config.ProgressColumn("OOS%",       format="%.1f%%", min_value=0, max_value=100),
-                "Upsell_Act_%": st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%", min_value=0, max_value=100),
-            })
-
-        st.markdown("---")
-
-        # ── Detailed sales conversations ──────────────────────────────────────
-        st.markdown("#### 🔎 Sales-Flagged Conversations")
-        _sf_mask = (
-            conv_filtered["IS_CONVERSION"].astype(bool) |
-            conv_filtered["IS_LOST_SALE"].astype(bool) |
-            conv_filtered["IS_OOS_CONFIRMED"].astype(bool) |
-            conv_filtered["IS_UPSELL_OPP"].astype(bool)
-        )
-        sales_flag = conv_filtered[_sf_mask]
-        sales_cols = [c for c in [
-            "CONVERSATION_ID","STORE_CODE","COUNTRY_CODE","TEAM_MEMBER",
-            "SALES_STAGE","IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED",
-            "IS_UPSELL_OPP","ALT_SUGGESTED","SENTIMENT","BUYER_SUMMARY"
-        ] if c in sales_flag.columns]
-        st.dataframe(sales_flag[sales_cols].reset_index(drop=True), use_container_width=True, height=350,
-            column_config={
-                "IS_CONVERSION":   st.column_config.CheckboxColumn("Converted?"),
-                "IS_LOST_SALE":    st.column_config.CheckboxColumn("Lost?"),
-                "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
-                "IS_UPSELL_OPP":   st.column_config.CheckboxColumn("Upsell Opp?"),
-                "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
-                "BUYER_SUMMARY":   st.column_config.TextColumn("Summary", width="large"),
+                "Conv_%":       st.column_config.ProgressColumn("Conv%",      format="%.1f%%",min_value=0,max_value=100),
+                "Lost_%":       st.column_config.ProgressColumn("Lost%",      format="%.1f%%",min_value=0,max_value=100),
+                "OOS_%":        st.column_config.ProgressColumn("OOS%",       format="%.1f%%",min_value=0,max_value=100),
+                "Upsell_Act_%": st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%",min_value=0,max_value=100),
             })
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 8 : AM & MERCH PERFORMANCE
+    # TAB 8 : AM & MERCH PERFORMANCE — with drilldowns
     # ══════════════════════════════════════════════════════════════════════════
     with tab8:
         st.markdown("### 🛍️ Account Management & Merchandising Performance")
         st.caption("Chat data as a sales signal — for AM and Merch teams to action.")
+
+        _cf8 = conv_filtered.copy()
+        for _bc in ["IS_CONVERSION","IS_LOST_SALE","IS_OOS_CONFIRMED","IS_UPSELL_OPP","ALT_SUGGESTED","IS_UNRESOLVED"]:
+            if _bc in _cf8.columns:
+                _cf8[_bc] = _cf8[_bc].astype(bool).astype(int)
 
         # ── AM Scorecard ──────────────────────────────────────────────────────
         st.markdown("#### 🏪 Per-Store AM Scorecard")
@@ -2181,14 +2390,40 @@ def main():
         if not am_df.empty:
             st.dataframe(am_df, use_container_width=True, hide_index=True,
                 column_config={
-                    "Conv_Rate_%":   st.column_config.ProgressColumn("Conv%",      format="%.1f%%", min_value=0, max_value=100),
-                    "Lost_Rate_%":   st.column_config.ProgressColumn("Lost%",      format="%.1f%%", min_value=0, max_value=100),
-                    "OOS_Rate_%":    st.column_config.ProgressColumn("OOS%",       format="%.1f%%", min_value=0, max_value=100),
-                    "Upsell_Act_%":  st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%", min_value=0, max_value=100),
-                    "CRR_%":         st.column_config.ProgressColumn("CRR%",       format="%.1f%%", min_value=0, max_value=100),
-                    "Avg_CSAT":      st.column_config.NumberColumn("CSAT",         format="%.1f"),
-                    "Avg_CRT_mins":  st.column_config.NumberColumn("CRT (min)",    format="%.0f"),
+                    "Conv_Rate_%":  st.column_config.ProgressColumn("Conv%",      format="%.1f%%",min_value=0,max_value=100),
+                    "Lost_Rate_%":  st.column_config.ProgressColumn("Lost%",      format="%.1f%%",min_value=0,max_value=100),
+                    "OOS_Rate_%":   st.column_config.ProgressColumn("OOS%",       format="%.1f%%",min_value=0,max_value=100),
+                    "Upsell_Act_%": st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%",min_value=0,max_value=100),
+                    "CRR_%":        st.column_config.ProgressColumn("CRR%",       format="%.1f%%",min_value=0,max_value=100),
+                    "Avg_CSAT":     st.column_config.NumberColumn("CSAT",         format="%.1f"),
+                    "Avg_CRT_mins": st.column_config.NumberColumn("CRT (min)",    format="%.0f"),
                 })
+
+            # ── Drilldown by Store ────────────────────────────────────────────
+            _store_sel = st.selectbox("🔍 Drill into a Store", ["(All Stores)"] + sorted(conv_filtered["STORE_CODE"].astype(str).unique().tolist()), key="am_store_sel")
+            _store_data = conv_filtered if _store_sel == "(All Stores)" else conv_filtered[conv_filtered["STORE_CODE"].astype(str) == _store_sel]
+            with st.expander(f"📋 {_store_sel} — Full Conversation Detail ({len(_store_data)} convs)", expanded=False):
+                _sd_cols = [c for c in [
+                    "CONVERSATION_ID","PLATFORM","CHANNEL_NAME","SITE_NICK_NAME_ID","COUNTRY_CODE",
+                    "TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME","ISSUE_TYPE","PRIORITY","SENTIMENT",
+                    "IS_CONVERSION","IS_OOS_CONFIRMED","IS_LOST_SALE","IS_UPSELL_OPP","ALT_SUGGESTED",
+                    "ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS","CSAT_PROXY","AVG_CRT_MINS","BUYER_SUMMARY"
+                ] if c in _store_data.columns]
+                st.dataframe(_store_data[_sd_cols].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=420, column_config={
+                        "IS_CONVERSION":   st.column_config.CheckboxColumn("Converted?"),
+                        "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
+                        "IS_LOST_SALE":    st.column_config.CheckboxColumn("Lost?"),
+                        "IS_UPSELL_OPP":   st.column_config.CheckboxColumn("Upsell Opp?"),
+                        "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "CSAT_PROXY":      st.column_config.NumberColumn("CSAT",   format="%.1f"),
+                        "AVG_CRT_MINS":    st.column_config.NumberColumn("CRT(m)", format="%.0f"),
+                        "LAST_MSG_TIME":   st.column_config.DatetimeColumn("Last Msg", format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY":   st.column_config.TextColumn("Summary", width="large"),
+                        "ITEM_IDS":        st.column_config.TextColumn("Item IDs"),
+                        "SIZE_MENTIONS":   st.column_config.TextColumn("Sizes"),
+                        "COLOR_MENTIONS":  st.column_config.TextColumn("Colours"),
+                    })
 
         st.markdown("---")
 
@@ -2205,115 +2440,67 @@ def main():
             ] if c in team_sales.columns]
             st.dataframe(team_sales[team_cols].reset_index(drop=True), use_container_width=True,
                 column_config={
-                    "CRR_%":         st.column_config.ProgressColumn("CRR%",       format="%.1f%%", min_value=0, max_value=100),
-                    "Conv_Rate_%":   st.column_config.ProgressColumn("Conv%",      format="%.1f%%", min_value=0, max_value=100),
-                    "Upsell_Act_%":  st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%", min_value=0, max_value=100),
-                    "Avg_CSAT":      st.column_config.NumberColumn("CSAT",         format="%.2f"),
-                    "Avg_CRT_mins":  st.column_config.NumberColumn("CRT (min)",    format="%.1f"),
+                    "CRR_%":        st.column_config.ProgressColumn("CRR%",       format="%.1f%%",min_value=0,max_value=100),
+                    "Conv_Rate_%":  st.column_config.ProgressColumn("Conv%",      format="%.1f%%",min_value=0,max_value=100),
+                    "Upsell_Act_%": st.column_config.ProgressColumn("Upsell Act%",format="%.1f%%",min_value=0,max_value=100),
+                    "Avg_CSAT":     st.column_config.NumberColumn("CSAT",         format="%.2f"),
+                    "Avg_CRT_mins": st.column_config.NumberColumn("CRT (min)",    format="%.1f"),
                 })
             if len(team_sales) > 1:
                 st.markdown("---")
-                h1, h2, h3 = st.columns(3)
+                h1,h2,h3 = st.columns(3)
                 best_crt  = team_sales.dropna(subset=["Avg_CRT_mins"]).nsmallest(1,"Avg_CRT_mins")
                 best_conv = team_sales.nlargest(1,"Conv_Rate_%")
                 best_csat = team_sales.nlargest(1,"Avg_CSAT")
                 with h1:
-                    if not best_crt.empty:
-                        st.success(f"⚡ **Fastest:** {best_crt.iloc[0]['TEAM_MEMBER']} ({fmt_mins(best_crt.iloc[0]['Avg_CRT_mins'])})")
+                    if not best_crt.empty: st.success(f"⚡ **Fastest:** {best_crt.iloc[0]['TEAM_MEMBER']} ({fmt_mins(best_crt.iloc[0]['Avg_CRT_mins'])})")
                 with h2:
-                    if not best_conv.empty:
-                        st.success(f"💰 **Top Converter:** {best_conv.iloc[0]['TEAM_MEMBER']} ({best_conv.iloc[0]['Conv_Rate_%']:.1f}%)")
+                    if not best_conv.empty: st.success(f"💰 **Top Converter:** {best_conv.iloc[0]['TEAM_MEMBER']} ({best_conv.iloc[0]['Conv_Rate_%']:.1f}%)")
                 with h3:
-                    if not best_csat.empty:
-                        st.success(f"⭐ **Top CSAT:** {best_csat.iloc[0]['TEAM_MEMBER']} ({best_csat.iloc[0]['Avg_CSAT']:.2f}/5)")
+                    if not best_csat.empty: st.success(f"⭐ **Top CSAT:** {best_csat.iloc[0]['TEAM_MEMBER']} ({best_csat.iloc[0]['Avg_CSAT']:.2f}/5)")
+
+            # ── Per-agent drilldown ───────────────────────────────────────────
+            st.markdown("---")
+            _agent_sel = st.selectbox("🔍 Drill into an Agent", ["(All Agents)"] + team_sales["TEAM_MEMBER"].tolist(), key="am_agent_sel")
+            _agent_data = (conv_filtered if _agent_sel == "(All Agents)"
+                           else conv_filtered[conv_filtered["TEAM_MEMBER"].astype(str) == _agent_sel])
+            _agent_data = _agent_data[_agent_data["LAST_MSG_TIME"] >= TEAM_START_DATE]
+            with st.expander(f"📋 {_agent_sel} — All Conversations ({len(_agent_data)})", expanded=False):
+                st.dataframe(_agent_data[_DRILL_BASE].sort_values("LAST_MSG_TIME", ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=420, column_config=_DRILL_CFG)
         else:
             st.info("No team data available for the selected period.")
 
         st.markdown("---")
 
-        # ── OOS Tracker ───────────────────────────────────────────────────────
-        st.markdown("#### 📦 OOS Demand Tracker")
-        st.caption("Share with buying/AM team weekly — every OOS = demand signal.")
-        oos_df = build_oos_tracker(conv_filtered)
-        # raw_df was deleted after analyse(); re-derive from conv_filtered for OOS summary
-        oos_store = conv_filtered[conv_filtered["IS_OOS_CONFIRMED"]].groupby(["STORE_CODE","ITEM_IDS"]).agg(
-            Demand_Count  = ("CONVERSATION_ID","count"),
-            Lost_Sales    = ("IS_LOST_SALE","sum"),
-            Color_Req     = ("COLOR_MENTIONS", lambda x: " | ".join(set(str(v) for v in x if v))),
-            Size_Req      = ("SIZE_MENTIONS",  lambda x: " | ".join(set(str(v) for v in x if v))),
-        ).reset_index().rename(columns={"ITEM_IDS":"Item IDs Inquired"})
-        oos_store["Priority Score"] = oos_store["Demand_Count"] + oos_store["Lost_Sales"] * 2
-        oos_store = oos_store.sort_values("Priority Score", ascending=False)
-        if not oos_store.empty:
-            st.dataframe(oos_store.head(30), use_container_width=True, hide_index=True,
-                column_config={
-                    "Priority Score": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=int(oos_store["Priority Score"].max())),
-                    "Lost_Sales":     st.column_config.NumberColumn("Lost Sales"),
-                })
-        else:
-            st.info("No OOS inquiries detected in the filtered data.")
-
-        st.markdown("---")
-
-        # ── Product Demand (Merch) ────────────────────────────────────────────
+        # ── Product & Variation Demand — Merch ────────────────────────────────
         st.markdown("#### 🔍 Product & Variation Demand — Merch Signals")
         st.caption("Top inquired items and requested sizes/colours — for listing optimisation and stock planning.")
         item_df, var_df = build_product_demand(conv_filtered)
-        # Derive from conv_filtered directly since raw_df freed
-        all_items  = [iid for ids in conv_filtered["ITEM_IDS"].fillna("").str.split("|") for iid in ids if iid]
-        all_sizes  = [sz  for szs in conv_filtered["SIZE_MENTIONS"].fillna("").str.split("|") for sz  in szs  if sz]
-        all_colors = [cl  for cls in conv_filtered["COLOR_MENTIONS"].fillna("").str.split("|") for cl  in cls  if cl]
-        from collections import Counter
-        d1, d2 = st.columns(2)
-        with d1:
-            st.markdown("**📦 Top Inquired Item IDs**")
+        _m1, _m2 = st.columns(2)
+        with _m1:
+            st.markdown("**📦 Top Inquired Item IDs (Product Inquiry convs)**")
             if not item_df.empty:
-                max_i = int(item_df["Inquiry Count"].max()) if len(item_df) > 0 else 1
+                max_i = int(item_df["Inquiry Count"].max())
                 st.dataframe(item_df, use_container_width=True, hide_index=True,
                     column_config={"Inquiry Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_i)})
             else:
                 st.info("No item IDs detected.")
-        with d2:
-            st.markdown("**📐 Top Requested Variations**")
+        with _m2:
+            st.markdown("**📐 Top Requested Variations (All convs)**")
             if not var_df.empty:
-                max_v = int(var_df["Count"].max()) if len(var_df) > 0 else 1
+                max_v = int(var_df["Count"].max())
                 st.dataframe(var_df, use_container_width=True, hide_index=True,
                     column_config={"Count": st.column_config.ProgressColumn(format="%d", min_value=0, max_value=max_v)})
             else:
                 st.info("No variation mentions detected.")
 
-        st.markdown("---")
-
-        # ── Lost Sales Analysis ───────────────────────────────────────────────
-        st.markdown("#### 💸 Lost Sales Analysis")
-        lost_df = conv_filtered[conv_filtered["IS_LOST_SALE"].astype(bool)]
-        if not lost_df.empty:
-            lc1, lc2 = st.columns(2)
-            with lc1:
-                _ld = lost_df.copy()
-                if "IS_OOS_CONFIRMED" in _ld.columns:
-                    _ld["IS_OOS_CONFIRMED"] = _ld["IS_OOS_CONFIRMED"].astype(bool).astype(int)
-                lost_store = _ld.groupby("STORE_CODE").agg(
-                    Lost_Sales=("CONVERSATION_ID","count"),
-                    OOS_Related=("IS_OOS_CONFIRMED","sum")
-                ).reset_index().sort_values("Lost_Sales",ascending=False)
-                st.markdown("**By Store**")
-                st.dataframe(lost_store, use_container_width=True, hide_index=True)
-            with lc2:
-                lost_issue = lost_df.groupby("ISSUE_TYPE").agg(
-                    Lost_Sales=("CONVERSATION_ID","count")
-                ).reset_index().sort_values("Lost_Sales",ascending=False)
-                st.markdown("**By Root Cause**")
-                st.dataframe(lost_issue, use_container_width=True, hide_index=True)
-        else:
-            st.success("✅ No lost sales detected in the filtered data.")
-
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 9 : KEY IMPROVEMENTS
+    # TAB 9 : KEY IMPROVEMENTS — with linked data
     # ══════════════════════════════════════════════════════════════════════════
     with tab9:
         st.markdown("### 🎯 Key Improvement Areas")
-        st.caption("Auto-generated from your chat data. Prioritised by business impact.")
+        st.caption("Auto-generated from your chat data. Each area links to the supporting conversations.")
 
         funnel9 = build_sales_funnel(conv_filtered)
         improvements = generate_key_improvements(conv_filtered, funnel9)
@@ -2331,11 +2518,79 @@ def main():
         st.markdown("---")
         st.markdown("#### 📋 Improvement Action Tracker")
         impr_df = pd.DataFrame([
-            {"Priority": pl, "Area": ar, "Recommendation": rc, "Status": "Open", "Owner": ""}
-            for pl, ar, rc in improvements
+            {"Priority":pl,"Area":ar,"Recommendation":rc,"Status":"Open","Owner":""}
+            for pl,ar,rc in improvements
         ])
         st.dataframe(impr_df, use_container_width=True, hide_index=True,
             column_config={"Recommendation": st.column_config.TextColumn(width="large")})
+
+        st.markdown("---")
+
+        # ── Linked data for each improvement area ─────────────────────────────
+        st.markdown("#### 🔗 Supporting Data per Improvement Area")
+
+        with st.expander("📦 OOS — Restock Priority List", expanded=False):
+            _oos9 = conv_filtered[conv_filtered["IS_OOS_CONFIRMED"].astype(bool)]
+            if not _oos9.empty:
+                _cf9 = _oos9.copy()
+                for _bc9 in ["IS_LOST_SALE","ALT_SUGGESTED"]:
+                    if _bc9 in _cf9.columns: _cf9[_bc9] = _cf9[_bc9].astype(bool).astype(int)
+                _oos9_agg = _cf9.groupby(["STORE_CODE","ITEM_IDS"]).agg(
+                    Demand=("CONVERSATION_ID","count"),
+                    Lost=("IS_LOST_SALE","sum"),
+                    Alt_Suggested=("ALT_SUGGESTED","sum"),
+                    Sizes=("SIZE_MENTIONS", lambda x:" | ".join(sorted(set(v for vals in x for v in str(vals).split("|") if v.strip())))),
+                    Colors=("COLOR_MENTIONS",lambda x:" | ".join(sorted(set(v for vals in x for v in str(vals).split("|") if v.strip())))),
+                ).reset_index()
+                _oos9_agg["Priority"] = _oos9_agg["Demand"] + _oos9_agg["Lost"]*2
+                st.dataframe(_oos9_agg.sort_values("Priority",ascending=False).reset_index(drop=True),
+                    use_container_width=True, hide_index=True,
+                    column_config={"Priority": st.column_config.ProgressColumn(format="%d",min_value=0,max_value=int(_oos9_agg["Priority"].max()))})
+            else:
+                st.info("No OOS data.")
+
+        with st.expander("💸 Lost Sales — Full Detail", expanded=False):
+            _ls9 = conv_filtered[conv_filtered["IS_LOST_SALE"].astype(bool)]
+            if not _ls9.empty:
+                _ls9_cols = [c for c in ["CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME","ISSUE_TYPE","IS_OOS_CONFIRMED","ALT_SUGGESTED","SENTIMENT","ITEM_IDS","BUYER_SUMMARY"] if c in _ls9.columns]
+                st.dataframe(_ls9[_ls9_cols].sort_values("LAST_MSG_TIME",ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=350, column_config={
+                        "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
+                        "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "LAST_MSG_TIME":   st.column_config.DatetimeColumn("Last Msg",format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY":   st.column_config.TextColumn("Summary",width="large"),
+                    })
+            else:
+                st.success("No lost sales.")
+
+        with st.expander("🔁 Missed Upsells — Agent Action Needed", expanded=False):
+            _mu9 = conv_filtered[conv_filtered["IS_UPSELL_OPP"].astype(bool) & ~conv_filtered["ALT_SUGGESTED"].astype(bool)]
+            if not _mu9.empty:
+                _mu9_cols = [c for c in ["CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME","ISSUE_TYPE","SENTIMENT","BUYER_SUMMARY"] if c in _mu9.columns]
+                st.dataframe(_mu9[_mu9_cols].sort_values("LAST_MSG_TIME",ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=350, column_config={
+                        "LAST_MSG_TIME": st.column_config.DatetimeColumn("Last Msg",format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY": st.column_config.TextColumn("Summary",width="large"),
+                    })
+            else:
+                st.success("All upsell opportunities were acted on!")
+
+        with st.expander("🛍️ Unconverted Product Inquiries — Warm Leads", expanded=False):
+            _up9 = conv_filtered[(conv_filtered["ISSUE_TYPE"].astype(str)=="Product Inquiry") & ~conv_filtered["IS_CONVERSION"].astype(bool)]
+            if not _up9.empty:
+                _up9_cols = [c for c in ["CONVERSATION_ID","STORE_CODE","CHANNEL_NAME","SITE_NICK_NAME_ID","COUNTRY_CODE","TEAM_MEMBER","BUYER_NAME","LAST_MSG_TIME","IS_OOS_CONFIRMED","ALT_SUGGESTED","ITEM_IDS","SIZE_MENTIONS","COLOR_MENTIONS","SENTIMENT","BUYER_SUMMARY"] if c in _up9.columns]
+                st.dataframe(_up9[_up9_cols].sort_values("LAST_MSG_TIME",ascending=False).reset_index(drop=True),
+                    use_container_width=True, height=380, column_config={
+                        "IS_OOS_CONFIRMED":st.column_config.CheckboxColumn("OOS?"),
+                        "ALT_SUGGESTED":   st.column_config.CheckboxColumn("Alt Suggested?"),
+                        "LAST_MSG_TIME":   st.column_config.DatetimeColumn("Last Msg",format="YYYY-MM-DD HH:mm"),
+                        "BUYER_SUMMARY":   st.column_config.TextColumn("Summary",width="large"),
+                        "ITEM_IDS":        st.column_config.TextColumn("Item IDs"),
+                        "SIZE_MENTIONS":   st.column_config.TextColumn("Sizes"),
+                        "COLOR_MENTIONS":  st.column_config.TextColumn("Colours"),
+                    })
+            else:
+                st.success("All product inquiries converted!")
 
     # ── Issue / Store Breakdown Tables (below all tabs — unchanged) ────────────
 
